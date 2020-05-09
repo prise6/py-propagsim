@@ -12,7 +12,7 @@ AVG_P_MOVE = .5 / N_MOVES_PER_PERIOD
 # N_AGENTS = 700000
 N_AGENTS = 7000
 # N_INFECTED_AGENTS_START = int(N_AGENTS / 40)
-PROP_INFECTED_AGENTS_START = 1 / 400
+PROP_INFECTED_AGENTS_START = 1 / 10
 # N_SQUARES_AXIS = 125
 N_SQUARES_AXIS = 40
 AVG_AGENTS_HOME = 2.2
@@ -102,15 +102,13 @@ transitions_75 = tf.constant([[1, 0, 0, 0, 0, 0, 0],
 
 transitions = [transitions_15, transitions_15_44, transitions_45_64, transitions_65_74, transitions_75]
 transitions = tf.stack(transitions, axis=2)
-# transitions = tf.transpose(transitions, perm=[1,0,2])
-# print(transitions[:, :, 4])
 print(f'Shape of transitions: {transitions.shape}')
 # endregion
 
 # =========== Agents ================
 
 # region
-agent_ids = tf.cast(tf.range(0, N_AGENTS), tf.uint32)
+agent_ids = tf.cast(tf.range(0, N_AGENTS), tf.int32)
 print(f'Shape of agent_ids: {agent_ids.shape}')
 
 prop_population = tf.convert_to_tensor([[.17, .35, .3, .1, .08]])
@@ -118,7 +116,7 @@ transitions_ids = tf.random.categorical(tf.math.log(prop_population), N_AGENTS)
 transitions_ids = tf.squeeze(transitions_ids)
 print(f'Shape of transitions_ids: {transitions_ids.shape}')
 
-home_cell_ids = tf.random.uniform((1, N_AGENTS), minval=0, maxval=N_HOME_CELLS, dtype=tf.int32)
+home_cell_ids = tf.random.uniform((N_AGENTS,), minval=0, maxval=N_HOME_CELLS, dtype=tf.int32)
 print(f'Shape of home_cell_ids: {home_cell_ids.shape}')
 
 p_moves = draw_beta(0, 1, AVG_P_MOVE, N_AGENTS)
@@ -137,16 +135,18 @@ durations = tf.stack(durations, axis=1)
 durations = tf.squeeze(durations)
 print(f'Shape of durations: {durations.shape}')
 
-current_state_ids = tfp.distributions.Multinomial(total_count=1, probs=[PROP_INFECTED_AGENTS_START]).sample(N_AGENTS)
+current_state_ids = tfp.distributions.Binomial(total_count=1, probs=PROP_INFECTED_AGENTS_START).sample(N_AGENTS)
 current_state_ids = tf.cast(current_state_ids, tf.int32) #fixfor gather
 current_state_ids = tf.squeeze(current_state_ids)
+print(current_state_ids)
 print(f'Shape of current_state_ids: {current_state_ids.shape}')
+print(f'Sum of current_state_ids (state 0 or 1): {tf.reduce_sum(current_state_ids, axis=-1)}')
 
 current_state_durations = tf.zeros((N_AGENTS,))
 current_state_durations = tf.cast(current_state_durations, tf.int32)
 print(f'Shape of current_state_durations: {current_state_durations.shape}')
 
-least_state_ids = tf.ones((N_AGENTS, 1))
+least_state_ids = tf.ones((N_AGENTS,))
 print(f'Shape of least_state_ids: {least_state_ids.shape}')
 
 # endregion
@@ -167,41 +167,46 @@ print(f'Shape of positions: {positions.shape}')
 
 attractivities = tf.random.uniform(shape=(N_CELLS,))
 print(f'Shape of attractivities: {attractivities.shape}')
-## TO-DO : attractivities[:N_HOME_CELLS] = 0
-## Note: pas d'equivalent dans la version cuda ?
+indices = tf.reshape(tf.range(0, N_HOME_CELLS), shape=(N_HOME_CELLS, 1))
+attractivities = tf.tensor_scatter_nd_update(attractivities, indices, tf.zeros(N_HOME_CELLS))
 
 
 unsafeties = tf.squeeze(draw_beta(0, 1, AVG_UNSAFETY, N_CELLS))
 print(f'Shape of unsafeties: {unsafeties.shape}')
-## TO-DO :: unsafeties[:N_HOME_CELLS] = 1
-## Note: pas d'equivalent dans la version cuda ?
+unsafeties = tf.tensor_scatter_nd_update(unsafeties, indices, tf.cast(tf.zeros(N_HOME_CELLS) + 1, tf.float16))
 
 # endregion
 
 # ========== Map ==============
 
 # region
-map = Map(cell_ids, attractivities, unsafeties, positions_x, positions_y, unique_state_ids, 
+map = Map(cell_ids, attractivities, unsafeties, positions_x, positions_y, unique_state_ids,
           unique_contagiousities, unique_sensitivities, unique_severities, transitions, agent_ids, home_cell_ids, p_moves, least_state_ids,
           current_state_ids, current_state_durations, durations, transitions_ids, dscale=DSCALE, current_period=0, verbose=0)
 # endregion
 
 
-stats = {}
-t_start = time()
+@tf.function
+def benchmark():
+    stats = {}
+    t_start = time()
 
-for i in range(N_PERIODS):
-    print(f'starting period {i}...')
-    t0 = time()
-    for j in range(N_MOVES_PER_PERIOD):
-        t_ = time()
-        map.make_move()
-        print(f'move computed in {time() - t_}s')
-    map.forward_all_cells()
-    states_ids, state_numbers = map.get_states_numbers()
-    states_ids, state_numbers = states_ids.numpy(), state_numbers.numpy()
-    stats[i] = {states_ids[k]: state_numbers[k] for k in range(len(states_ids))}
-    print(f'period {i} computed in {time() - t0}s')
+    for i in range(N_PERIODS):
+        print(f'starting period {i}...')
+        t0 = time()
+        for j in range(N_MOVES_PER_PERIOD):
+            t_ = time()
+            map.make_move()
+            print(f'move computed in {time() - t_}s')
+        map.forward_all_cells()
+        states_ids, state_numbers = map.get_states_numbers()
+        states_ids, state_numbers = states_ids.numpy(), state_numbers.numpy()
+        stats[i] = {states_ids[k]: state_numbers[k] for k in range(len(states_ids))}
+        print(f'period {i} computed in {time() - t0}s')
 
-print(f'duration: {time() - t_start}s')
-print(stats)
+    print(f'duration: {time() - t_start}s')
+    print(stats)
+
+
+if __name__ == '__main__':
+    benchmark()

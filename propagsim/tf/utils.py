@@ -1,10 +1,8 @@
 import tensorflow as tf
 import warnings
-import itertools
-from time import time
-from typing import Union
+import numpy as np
 
-warnings.filterwarnings('ignore', category=RuntimeWarning) 
+warnings.filterwarnings('ignore', category=RuntimeWarning)
 
 
 def append(a: tf.Tensor, b: tf.Tensor):
@@ -16,21 +14,6 @@ def append(a: tf.Tensor, b: tf.Tensor):
     b = tf.cast(b, tf.float32)
     appended_tensor = tf.concat([a, b], axis=-1)
     return appended_tensor
-
-
-def get_least_severe_state(states):
-    """ Get the state that has the least severity > 0 """
-    least_severe_state = None
-    for state in states:
-        if state.severity == 0:
-            continue
-        if least_severe_state is None:
-            least_severe_state = state
-        elif state.get_severity() < least_severe_state.get_severity():
-            least_severe_state = state
-    if least_severe_state is None:  # all states have severity 0
-        least_severe_state = states[0]
-    return least_severe_state
 
 
 def squarify(xcoords: tf.Tensor, ycoords: tf.Tensor):
@@ -135,7 +118,8 @@ def vectorized_choice(prob_matrix, axis=1):
     see https://stackoverflow.com/questions/34187130/fast-random-weighted-selection-across-all-rows-of-a-stochastic-matrix
     """
     # s = prob_matrix.cumsum(axis=axis)
-    r = tf.random.uniform(shape=[prob_matrix.shape[1 - axis]])
+    # r = tf.random.uniform(shape=[prob_matrix.shape[1 - axis]])
+    r = tf.random.uniform(shape=[tf.shape(prob_matrix)[1 - axis]])
     r = tf.reshape(r, (2 * (1 - axis) - 1, 2 * axis - 1))
     k = tf.math.reduce_sum(tf.cast(prob_matrix < r, tf.float32), axis=axis)
     # max_choice = prob_matrix.shape[axis]
@@ -143,12 +127,31 @@ def vectorized_choice(prob_matrix, axis=1):
     return k
 
 
-
 def group_max(data, groups):
-    order = cp.lexsort(cp.vstack((data, groups)))
+    """
+    To Do Later
+    """
+    groups = tf.cast(groups, tf.float32)
+    groups_np = groups.numpy()
+    order = tf.sort(tf.stack([data, groups], axis=1))
+    order = tf.cast(order, tf.int32)
+    groups = tf.gather(groups, order) # this is only needed if groups is unsorted
+    data = tf.gather(data, order)
+    # index = cp.empty(groups.shape[0], 'bool')
+    index = np.ones(groups.shape[0], dtype=bool)
+    index[-1] = True
+    index[:-1] = (groups_np[1:] != groups_np[:-1])
+    result = (tf.boolean_mask(data, index), tf.convert_to_tensor(index))
+    return result
+
+
+def group_max_np(data, groups):
+    # data = data.numpy()
+    # groups = groups.numpy()
+    order = np.lexsort((data, groups))
     groups = groups[order] # this is only needed if groups is unsorted
     data = data[order]
-    index = cp.empty(groups.shape[0], 'bool')
+    index = np.empty(groups.shape[0], 'bool')
     index[-1] = True
     index[:-1] = groups[1:] != groups[:-1]
     return data[index], index
@@ -176,18 +179,6 @@ def assign_tensor_with_numpy(tensor, slice_x, slice_y, assignement):
 # For distances:
 # see: https://stackoverflow.com/questions/52030458/vectorized-spatial-distance-in-python-using-numpy
 
-def ext_arrs(A,B, precision="float64"):
-    nA, dim = A.shape
-    A_ext = cp.ones((nA,dim*3),dtype=precision)
-    A_ext[:,dim:2*dim] = A
-    A_ext[:,2*dim:] = A**2
-
-    nB = B.shape[0]
-    B_ext = cp.ones((dim*3,nB),dtype=precision)
-    B_ext[:dim] = (B**2).T
-    B_ext[dim:2*dim] = -2.0*B.T
-    return A_ext, B_ext
-
 
 def cdist(a: tf.Tensor):
     print(f'cdist - shape of input a: {a.shape}')
@@ -205,7 +196,7 @@ def repeat(data, count):
     # return cp.array(list(itertools.chain(*(itertools.repeat(elem, n) for elem, n in zip(data, count)))))
 
 
-def pairwise_dist(A, B):  
+def pairwise_dist(A, B):
     """
     See: https://github.com/tensorflow/tensorflow/issues/30659
     Computes pairwise euclidean distances between each elements of A and each elements of B.

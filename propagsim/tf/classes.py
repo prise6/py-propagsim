@@ -1,7 +1,6 @@
 import numpy as np
 import tensorflow as tf
-import os, pickle
-from utils import get_least_severe_state, squarify, get_square_sampling_probas, get_cell_sampling_probas, vectorized_choice, group_max, append
+from utils import squarify, get_square_sampling_probas, get_cell_sampling_probas, vectorized_choice, group_max_np, append
 from time import time
 
         
@@ -88,7 +87,9 @@ class Map:
         self.r_factors = tf.constant([])
         # TODO: Contagion chains
         # Define arrays for agents state transitions
-        self.infecting_agents, self.infected_agents, self.infected_periods = tf.constant([]), tf.constant([]), tf.constant([])
+        self.infecting_agents = tf.constant([], dtype=tf.int32)
+        self.infected_agents = tf.constant([], dtype=tf.int32)
+        self.infected_periods = tf.constant([], dtype=tf.int32)
 
     def contaminate(self, selected_agents, selected_cells):
         """ both arguments have same length. If an agent with sensitivity > 0 is in the same cell 
@@ -98,22 +99,45 @@ class Map:
         t0 = time()
         selected_agents = tf.cast(selected_agents, tf.int32)
         selected_cells = tf.cast(selected_cells, tf.int32)
-        # selected_unsafeties = self.unsafeties[selected_cells]
+        selected_cells = tf.sort(selected_cells)
+        order_cells = tf.argsort(selected_cells)
+
+        selected_agents = tf.gather(selected_agents, order_cells)
         selected_unsafeties = tf.gather(self.unsafeties, selected_cells)
         selected_states = tf.gather(self.current_state_ids, selected_agents)
         selected_contagiousities = tf.gather(self.unique_contagiousities, selected_states)
         selected_sensitivities = tf.gather(self.unique_sensitivities, selected_states)
         print(f'ttt first part contaminate: {time() - t0}')
         # Find cells where max contagiousity == 0 (no contagiousity can happen there)
+
+        # /!\ donnera toujours zero par construction ?
+        # cont_sens = tf.multiply(selected_contagiousities, selected_sensitivities)
+        # # Combine them
+        # if tf.math.reduce_max(cont_sens) == 0:
+        #     print("contaminate - return")
+        #     return
+        # t0 = time()
+        # mask_zero = (cont_sens > 0)
+        # /!\
         t0 = time()
-        cont_sens = tf.multiply(selected_contagiousities, selected_sensitivities)
+        # max_contagiousities, _ = group_max_np(data=selected_contagiousities, groups=selected_cells)
+        max_contagiousities, _ = tf.numpy_function(
+            func=group_max_np,
+            inp=[selected_contagiousities, selected_cells],
+            Tout=[tf.float32, tf.float32]
+        )
         print(f'ttt group max sensitivities: {time() - t0}')
-        # Combine them
-        if tf.math.reduce_max(cont_sens) == 0:
-            print("contaminate - return")
-            return
-        t0 = time()
-        mask_zero = (cont_sens > 0)
+        # max_sensitivities, _ = group_max_np(data=selected_sensitivities, groups=selected_cells)
+        max_sensitivities, _ = tf.numpy_function(
+            func=group_max_np,
+            inp=[selected_sensitivities, selected_cells],
+            Tout=[tf.float32, tf.float32]
+        )
+        print(f'ttt group max sensitivities: {time() - t0}')
+        mask_zero = (tf.multiply(max_contagiousities, max_sensitivities) > 0)
+        _, _, counts = tf.unique_with_counts(selected_cells)
+        mask_zero = tf.repeat(mask_zero, counts)
+
         selected_agents = selected_agents[mask_zero]
         selected_contagiousities = selected_contagiousities[mask_zero]
         selected_sensitivities = selected_sensitivities[mask_zero]
@@ -123,12 +147,13 @@ class Map:
 
         # Compute proportion (contagious agent) / (non contagious agent) by cell
         t0 = time()
-        _, n_contagious_by_cell = cp.unique(selected_cells[selected_contagiousities > 0], return_counts=True)
-        _, n_non_contagious_by_cell = cp.unique(selected_cells[selected_contagiousities == 0], return_counts=True)
+        _, _, n_contagious_by_cell = tf.unique_with_counts(selected_cells[selected_contagiousities > 0])
+        _, _, n_non_contagious_by_cell = tf.unique_with_counts(selected_cells[selected_contagiousities == 0])
         print(f'ttt non contagious: {time() - t0}')
+
         i += 1
         t0 = time()
-        p_contagious = cp.divide(n_contagious_by_cell, n_non_contagious_by_cell)
+        p_contagious = tf.math.divide(n_contagious_by_cell, n_non_contagious_by_cell)
 
         n_selected_agents = selected_agents.shape[0]
         print(f'ttt p_contagious: {time() - t0}')
@@ -139,7 +164,13 @@ class Map:
             return
         # Find for each cell which agent has the max contagiousity inside (it will be the contaminating agent)
         t0 = time()
-        max_contagiousities, mask_max_contagiousities = group_max(data=selected_contagiousities, groups=selected_cells) 
+        # max_contagiousities, mask_max_contagiousities = group_max_np(data=selected_contagiousities, groups=selected_cells)
+        max_contagiousities, mask_max_contagiousities = tf.numpy_function(
+            func=group_max_np,
+            inp=[selected_contagiousities, selected_cells],
+            Tout=[tf.float32, tf.bool]
+        )
+        mask_max_contagiousities = tf.ensure_shape(mask_max_contagiousities, (None))
         print(f'ttt max contagious: {time() - t0}')
         t0 = time()
         infecting_agents = selected_agents[mask_max_contagiousities]
@@ -157,50 +188,72 @@ class Map:
         # Group `selected_cells` and expand `infecting_agents` and `selected_contagiousities` accordingly
         # There is one and only one infecting agent by pinselected_agentsfected_cell so #`counts` == #`infecting_agents`
         t0 = time()
-        _, inverse = cp.unique(selected_cells, return_inverse=True)
+        _, inverse = tf.unique(selected_cells)
         print(f'ttt inverse select cell: {time() - t0}')
         # TODO: ACHTUNG: count repeat replace by inverse here
         t0 = time()
-        infecting_agents = infecting_agents[inverse]
-        selected_contagiousities = selected_contagiousities[inverse]
-        p_contagious = p_contagious[inverse]
+        infecting_agents = tf.gather(infecting_agents, inverse)
+        selected_contagiousities = tf.gather(selected_contagiousities, inverse)
+        p_contagious = tf.gather(p_contagious, inverse)
         print(f'ttt p_contagious inverse: {time() - t0}')
         # Compute contagions
         t0 = time()
-        res = cp.multiply(selected_contagiousities, selected_sensitivities)
-        res = cp.multiply(res, selected_unsafeties)
+        res = tf.math.multiply(selected_contagiousities, selected_sensitivities)
+        res = tf.math.multiply(res, tf.cast(selected_unsafeties, tf.float32))
         print(f'ttt cp.multiply: {time() - t0}')
         # Modifiy probas contamination according to `p_contagious`
         t0 = time()
         mask_p = (p_contagious < 1)
-        res[mask_p] = cp.multiply(res[mask_p], p_contagious[mask_p])
-        res[~mask_p] = 1 - cp.divide(1 - res[~mask_p], p_contagious[~mask_p])
+        p_contagious = tf.cast(p_contagious, tf.float32)
+        x = res[mask_p]
+        x = tf.cast(x, tf.float32)
+        y = p_contagious[mask_p]
+        indice = tf.range(0, mask_p.shape[0])[mask_p]
+        indice = tf.reshape(indice, shape=(indice.shape[0], 1))
+        replacement = tf.math.multiply(x, y)
+        res = tf.tensor_scatter_nd_update(res, indice, replacement)
+
+        indice = tf.range(0, mask_p.shape[0])[~mask_p]
+        indice = tf.reshape(indice, shape=(indice.shape[0], 1))
+        replacement = 1 - tf.divide(1 - res[~mask_p], p_contagious[~mask_p])
+        res = tf.tensor_scatter_nd_update(res, indice, replacement)
+
         print(f'ttt res mask p: {time() - t0}')
 
         t0 = time()
-        draw = cp.random.uniform(size=infecting_agents.shape[0])
+        draw = tf.random.uniform(shape=[infecting_agents.shape[0]])
         draw = (draw < res)
         infecting_agents = infecting_agents[draw]
         infected_agents = pinfected_agents[draw]
         n_infected_agents = infected_agents.shape[0]
+
+        print(n_infected_agents)
+
         print(f'ttt n_infected draw: {time() - t0}')
         if self.verbose > 1:
             print(f'Infecting and infected agents should be all different, are they? {((infecting_agents == infected_agents).sum() == 0)}')
             print(f'Number of infected agents: {n_infected_agents}')
         t0 = time()
-        self.current_state_ids[infected_agents] = self.least_state_ids[infected_agents]
-        self.current_state_durations[infected_agents] = 0
+
+        replacement = tf.cast(tf.gather(self.least_state_ids, infected_agents), tf.int32)
+        indice = tf.reshape(infected_agents, shape=(infected_agents.shape[0], 1))
+        self.current_state_ids = tf.tensor_scatter_nd_update(self.current_state_ids, indice, replacement)
+        
+        replacement = tf.cast(tf.zeros(indice.shape[0]), tf.int32)
+        self.current_state_durations = tf.tensor_scatter_nd_update(self.current_state_durations, indice, replacement)
         self.n_infected_period += n_infected_agents
-        self.infecting_agents = append(self.infecting_agents, infecting_agents)
-        self.infected_agents = append(self.infected_agents, infected_agents)
-        self.infected_periods = append(self.infected_periods, cp.multiply(cp.ones(n_infected_agents), self.current_period))
+        # self.infecting_agents = append(self.infecting_agents, infecting_agents)
+        self.infecting_agents = tf.concat([self.infecting_agents, infecting_agents], axis=-1)
+        self.infected_agents = tf.concat([self.infected_agents, infected_agents], axis=-1)
+        to_append = tf.math.multiply(tf.ones(n_infected_agents, dtype=tf.int32), self.current_period)
+        self.infected_periods = tf.concat([self.infected_periods, to_append], axis=-1)
         print(f'ttt final: {time() - t0}')
         print(f'contaminate computed in {time() - t_start}')
 
     def move_agents(self, selected_agents):
         """ First select the square where they move and then the cell inside the square """
         t0 = time()
-        selected_agents = tf.cast(selected_agents, tf.int32)
+        # selected_agents = tf.cast(selected_agents, tf.int32)
         agents_squares_to_move = tf.gather(self.agent_squares, selected_agents)
 
         """
@@ -252,7 +305,8 @@ class Map:
 
     def make_move(self):
         """ determine which agents to move, then move hem and proceed to the contamination process """
-        probas_move = tf.multiply(tf.reshape(self.p_moves, -1), tf.cast(1 - tf.gather(self.unique_severities, self.current_state_ids), tf.float16))
+
+        probas_move = tf.multiply(tf.squeeze(self.p_moves), tf.cast(1 - tf.gather(self.unique_severities, self.current_state_ids), tf.float16))
         draw = tf.cast(tf.random.uniform(shape=[probas_move.shape[0]]), tf.float16)
         print(f'make_move - shape of draw: {draw.shape}')
         t0 = time()
@@ -341,7 +395,7 @@ class Map:
 
     def get_r_factors(self):
         return self.r_factors
-    
+
     def get_contamination_chain(self):
         return self.infecting_agents, self.infected_agents, self.infected_periods
 
@@ -356,104 +410,6 @@ class Map:
 
         new_state_durations = np.zeros(shape=(agent_ids.shape[0]))
         self.current_state_durations = tf.tensor_scatter_nd_update(self.current_state_durations, agent_ids, new_state_durations)
-
-    def save(self, savedir):
-        """ persist map in `savedir` """
-        if not os.path.isdir(savedir):
-            os.makedirs(savedir)
-        # Persist arrays
-        dsave = {}
-        dsave['unique_state_ids'] = self.unique_state_ids, 
-        dsave['unique_contagiousities'] = self.unique_contagiousities, 
-        dsave['unique_sensitivities'] =  self.unique_sensitivities, 
-        dsave['unique_severities'] =  self.unique_severities, 
-        dsave['cell_ids'] =  self.cell_ids, 
-        dsave['unsafeties'] = self.unsafeties, 
-        dsave['square_sampling_probas'] =  self.square_sampling_probas, 
-        dsave['eligible_cells'] =  self.eligible_cells,
-        dsave['coords_squares'] =  self.coords_squares,
-        dsave['square_ids_cells'] =  self.square_ids_cells,
-        dsave['cell_sampling_probas'] = self.cell_sampling_probas, 
-        dsave['cell_index_shift'] = self.cell_index_shift,
-        dsave['agent_ids'] = self.agent_ids,
-        dsave['p_moves'] = self.p_moves,
-        dsave['least_state_ids'] = self.least_state_ids,
-        dsave['unique_state_ids'] = self.unique_state_ids,
-        dsave['home_cell_ids'] = self.home_cell_ids,
-        dsave['current_state_ids'] = self.current_state_ids,
-        dsave['current_state_durations'] = self.current_state_durations,
-        dsave['agent_squares'] = self.agent_squares
-        dsave['transitions'] = self.transitions,
-        dsave['transitions_ids'] = self.transitions_ids,
-        dsave['durations'] = self.durations,
-        dsave['r_factors'] = self.r_factors, 
-        dsave['infecting_agents'] = self.infecting_agents, 
-        dsave['infected_agents'] = self.infected_agents, 
-        dsave['infected_periods'] = self.infected_periods
-
-        for fname, arr in dsave.items():
-            filepath = os.path.join(savedir, f'{fname}.npy')
-            cp.save(filepath, arr)
-
-        # Persist scalars and other parameters
-        sdict = {}
-        sdict['current_period'] = self.current_period
-        sdict['verbose'] = self.verbose
-        sdict['dcale'] = self.dscale
-        sdict['n_infected_period'] = self.n_infected_period
-        sdict['n_diseased_period'] = self.n_diseased_period
-
-        sdict_path = os.path.join(savedir, 'params.pkl')
-        with open(sdict_path, 'wb') as f:
-            pickle.dump(sdict, f, protocol=pickle.HIGHEST_PROTOCOL)
-
-        if self.verbose > 0:
-            print(f'Map persisted under folder: {savedir}')
-
-    def load(self, savedir):
-        """ load map that has been persisted in `savedir` through `self.save()` """
-        if not os.path.isdir(savedir):
-            print(f'{savedir} is not a path')
-        
-        self.unique_state_ids = cp.squeeze(cp.load(os.path.join(savedir, 'unique_state_ids.npy')))
-        self.unique_contagiousities = cp.squeeze(cp.load(os.path.join(savedir, 'unique_contagiousities.npy')))
-        self.unique_sensitivities = cp.squeeze(cp.load(os.path.join(savedir, 'unique_sensitivities.npy')))
-        self.unique_severities = cp.squeeze(cp.load(os.path.join(savedir, 'unique_severities.npy')))
-        self.cell_ids = cp.squeeze(cp.load(os.path.join(savedir, 'cell_ids.npy')))
-        self.unsafeties = cp.squeeze(cp.load(os.path.join(savedir, 'unsafeties.npy')))
-        self.square_sampling_probas = cp.squeeze(cp.load(os.path.join(savedir, 'square_sampling_probas.npy')))
-        self.eligible_cells = cp.squeeze(cp.load(os.path.join(savedir, 'eligible_cells.npy')))
-        self.coords_squares = cp.squeeze(cp.load(os.path.join(savedir, 'coords_squares.npy')))
-        self.square_ids_cells = cp.squeeze(cp.load(os.path.join(savedir, 'square_ids_cells.npy')))
-        self.cell_sampling_probas = cp.squeeze(cp.load(os.path.join(savedir, 'cell_sampling_probas.npy')))
-        self.cell_index_shift = cp.squeeze(cp.load(os.path.join(savedir, 'cell_index_shift.npy')))
-        self.agent_ids = cp.squeeze(cp.load(os.path.join(savedir, 'agent_ids.npy')))
-        self.p_moves = cp.squeeze(cp.load(os.path.join(savedir, 'p_moves.npy')))
-        self.least_state_ids = cp.squeeze(cp.load(os.path.join(savedir, 'least_state_ids.npy')))
-        self.unique_state_ids = cp.squeeze(cp.load(os.path.join(savedir, 'unique_state_ids.npy')))
-        self.home_cell_ids = cp.squeeze(cp.load(os.path.join(savedir, 'home_cell_ids.npy')))
-        self.current_state_ids = cp.squeeze(cp.load(os.path.join(savedir, 'current_state_ids.npy')))
-        self.current_state_durations = cp.squeeze(cp.load(os.path.join(savedir, 'current_state_durations.npy')))
-        self.agent_squares = cp.squeeze(cp.load(os.path.join(savedir, 'agent_squares.npy')))
-        self.transitions = cp.squeeze(cp.load(os.path.join(savedir, 'transitions.npy')))
-        self.transitions_ids = cp.squeeze(cp.load(os.path.join(savedir, 'transitions_ids.npy')))
-        self.durations = cp.squeeze(cp.load(os.path.join(savedir, 'durations.npy')))
-        self.r_factors = cp.squeeze(cp.load(os.path.join(savedir, 'r_factors.npy')))
-        self.infecting_agents = cp.squeeze(cp.load(os.path.join(savedir, 'infecting_agents.npy')))
-        self.infected_agents = cp.squeeze(cp.load(os.path.join(savedir, 'infected_agents.npy')))
-        self.infected_periods = cp.squeeze(cp.load(os.path.join(savedir, 'infected_periods.npy')))
-
-        sdict_path = os.path.join(savedir, 'params.pkl')
-        with open(sdict_path, 'rb') as f:
-            sdict = pickle.load(f)
-
-        self.current_period = sdict['current_period']
-        self.verbose = sdict['verbose']
-        self.dscale = sdict['dcale']
-        self.n_infected_period = sdict['n_infected_period']
-        self.n_diseased_period = sdict['n_diseased_period']
-
-    # For calibration: reset parameters that can change due to public policies
 
     def set_p_moves(self, p_moves):
         self.p_moves = p_moves
