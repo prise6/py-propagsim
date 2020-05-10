@@ -185,8 +185,8 @@ map = Map(cell_ids, attractivities, unsafeties, positions_x, positions_y, unique
           current_state_ids, current_state_durations, durations, transitions_ids, dscale=DSCALE, current_period=0, verbose=0)
 # endregion
 
-
-@tf.function
+# Test pour mode graph:
+# @tf.function
 def benchmark():
     stats = {}
     t_start = time()
